@@ -1,0 +1,9 @@
+<library path="omni_controller">
+    <class name="omni_controller/OmniController"
+        type="omni_controller::OmniController"
+        base_class_type="controller_interface::ControllerInterface">
+        <description>
+            Unified controller for Mulinex robot: wheel IK, leg commands, state broadcasting
+        </description>
+    </class>
+</library>
