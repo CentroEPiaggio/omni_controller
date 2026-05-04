@@ -55,6 +55,10 @@ CallbackReturn OmniController::on_init()
         auto_declare<bool>("pub_performance", true);
         auto_declare<std::string>("wheel_mode", "ik");
 
+        // Velocity low-pass filter
+        auto_declare<bool>("velocity_lpf.enabled", false);
+        auto_declare<double>("velocity_lpf.cutoff_freq", 1.0);
+
         // Transitions (rest / stand)
         auto_declare<double>("rest_duration", 0.0);
         auto_declare<double>("stand_duration", 0.0);
@@ -208,6 +212,25 @@ CallbackReturn OmniController::on_configure(const rclcpp_lifecycle::State&)
         direct_wheel_vel_cmd_[jnt] = 0.0;
         direct_wheel_kp_cmd_[jnt] = 0.0;
         direct_wheel_kd_cmd_[jnt] = 1.0;
+    }
+
+    // ── Velocity low-pass filter ────────────────────────────────────────
+    lpf_enabled_ = get_node()->get_parameter("velocity_lpf.enabled").as_bool();
+    lpf_cutoff_freq_ = get_node()->get_parameter("velocity_lpf.cutoff_freq").as_double();
+    if (lpf_enabled_) {
+        if (lpf_cutoff_freq_ <= 0.0) {
+            RCLCPP_WARN(
+                get_node()->get_logger(),
+                "velocity_lpf.cutoff_freq must be > 0, got %.2f. Disabling LPF.",
+                lpf_cutoff_freq_
+            );
+            lpf_enabled_ = false;
+        } else {
+            RCLCPP_INFO(
+                get_node()->get_logger(), "Velocity LPF enabled with cutoff freq: %.2f Hz",
+                lpf_cutoff_freq_
+            );
+        }
     }
 
     // ── Transition configuration (rest / stand) ──────────────────────────
@@ -472,6 +495,12 @@ CallbackReturn OmniController::on_activate(const rclcpp_lifecycle::State&)
     joints_reference_timeout_throttle_ = 0;
     heartbeat_received_ = false;
 
+    // Reset velocity filter state
+    vel_filter_time_initialized_ = false;
+    base_vel_filtered_[0] = 0.0;
+    base_vel_filtered_[1] = 0.0;
+    base_vel_filtered_[2] = 0.0;
+
     RCLCPP_INFO(
         get_node()->get_logger(), "on_activate successful (INACTIVE, waiting for activate_srv)"
     );
@@ -657,6 +686,8 @@ OmniController::update(const rclcpp::Time& time, const rclcpp::Duration&)
             break;
         case ControllerState::ACTIVE:
             if (has_wheels_) {
+                if (lpf_enabled_)
+                    apply_velocity_filter(time);
                 if (wheel_mode_ == WHEEL_IK && wheel_ik_)
                     write_wheel_commands();
                 else if (wheel_mode_ == WHEEL_DIRECT)
@@ -926,7 +957,12 @@ void OmniController::publish_odometry(const rclcpp::Time& time)
 
 void OmniController::write_wheel_commands()
 {
-    auto wheel_vels = wheel_ik_->inverse(base_vel_[0], base_vel_[1], base_vel_[2]);
+    // Use filtered velocity if LPF is enabled, otherwise use raw velocity
+    double vx = lpf_enabled_ ? base_vel_filtered_[0] : base_vel_[0];
+    double vy = lpf_enabled_ ? base_vel_filtered_[1] : base_vel_[1];
+    double wz = lpf_enabled_ ? base_vel_filtered_[2] : base_vel_[2];
+
+    auto wheel_vels = wheel_ik_->inverse(vx, vy, wz);
 
     for (size_t g = 0; g < wheel_groups_.size(); g++) {
         for (const auto& jnt : wheel_groups_[g]) {
@@ -1347,6 +1383,49 @@ void OmniController::update_damping(const rclcpp::Time& time)
         safety_state_ = SafetyState::SAFETY_STOPPED;
         RCLCPP_WARN(get_node()->get_logger(), "Damping complete, transitioning to STOPPED");
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Velocity Low-Pass Filter
+// ═══════════════════════════════════════════════════════════════════════════
+
+void OmniController::apply_velocity_filter(const rclcpp::Time& time)
+{
+    // Initialize filter time on first call
+    if (!vel_filter_time_initialized_) {
+        last_vel_filter_time_ = time;
+        vel_filter_time_initialized_ = true;
+        // Copy current velocity as initial filtered state
+        base_vel_filtered_[0] = base_vel_[0];
+        base_vel_filtered_[1] = base_vel_[1];
+        base_vel_filtered_[2] = base_vel_[2];
+        return;
+    }
+
+    // Compute time delta in seconds
+    double dt = (time - last_vel_filter_time_).seconds();
+    last_vel_filter_time_ = time;
+
+    //! we handle here big jumps in dt by re-initializing the filter
+    //! it's ugly but since we care about deceleration it works
+    if (dt <= 0.0 || dt > 1.0) {
+        // Ignore invalid dt (e.g., time jump), copy raw velocity
+        base_vel_filtered_[0] = base_vel_[0];
+        base_vel_filtered_[1] = base_vel_[1];
+        base_vel_filtered_[2] = base_vel_[2];
+        return;
+    }
+
+    // Compute first-order low-pass filter coefficient
+    // alpha = dt * wc / (1 + dt * wc), where wc = 2*pi*fc 
+    double wc = 2.0 * M_PI * lpf_cutoff_freq_;
+    double alpha = dt * wc / (1.0 + dt * wc);
+    alpha = std::clamp(alpha, 0.0, 1.0);
+
+    // Apply filter to all three velocity components so no changes in the directionality
+    base_vel_filtered_[0] = alpha * base_vel_[0] + (1.0 - alpha) * base_vel_filtered_[0];
+    base_vel_filtered_[1] = alpha * base_vel_[1] + (1.0 - alpha) * base_vel_filtered_[1];
+    base_vel_filtered_[2] = alpha * base_vel_[2] + (1.0 - alpha) * base_vel_filtered_[2];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
