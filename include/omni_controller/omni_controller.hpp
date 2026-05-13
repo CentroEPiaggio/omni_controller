@@ -178,7 +178,7 @@ private:
 
     // Velocity limits
     double max_twist_x = 0.5;
-    double max_tiwst_y = 0.5;
+    double max_twist_y = 0.5;
     double max_twist_z = 0.5;
     
     // Direct wheel commands: per-wheel buffered values
