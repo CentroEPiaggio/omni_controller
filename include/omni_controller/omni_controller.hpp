@@ -176,6 +176,11 @@ private:
     rclcpp::Time last_vel_filter_time_;
     bool vel_filter_time_initialized_ = false;
 
+    // Velocity limits
+    double max_twist_x = 0.5;
+    double max_tiwst_y = 0.5;
+    double max_twist_z = 0.5;
+    
     // Direct wheel commands: per-wheel buffered values
     std::map<std::string, double> direct_wheel_vel_cmd_;
     std::map<std::string, double> direct_wheel_kp_cmd_;

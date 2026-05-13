@@ -59,6 +59,11 @@ CallbackReturn OmniController::on_init()
         auto_declare<bool>("velocity_lpf.enabled", false);
         auto_declare<double>("velocity_lpf.cutoff_freq", 1.0);
 
+        // Velocity limits 
+        auto_declare<double>("twist_max_x", 0.5);
+        auto_declare<double>("twist_max_y", 0.5);
+        auto_declare<double>("twist_max_z", 1.0);
+
         // Transitions (rest / stand)
         auto_declare<double>("rest_duration", 0.0);
         auto_declare<double>("stand_duration", 0.0);
@@ -232,6 +237,12 @@ CallbackReturn OmniController::on_configure(const rclcpp_lifecycle::State&)
             );
         }
     }
+
+    // Velocity limits
+    max_twist_x = get_node()->get_parameter("twist_max_x").as_bool();
+    max_twist_y = get_node()->get_parameter("twist_max_y").as_bool();
+    max_twist_z = get_node()->get_parameter("twist_max_z").as_bool();
+
 
     // ── Transition configuration (rest / stand) ──────────────────────────
     rest_duration_ = get_node()->get_parameter("rest_duration").as_double();
@@ -735,9 +746,9 @@ void OmniController::twist_callback(const geometry_msgs::msg::Twist::SharedPtr m
     std::lock_guard<std::mutex> lg(var_mutex_);
     dl_miss_count_ = 0;
     if (c_stt_ == ControllerState::ACTIVE) {
-        base_vel_[0] = msg->linear.x;
-        base_vel_[1] = msg->linear.y;
-        base_vel_[2] = msg->angular.z;
+        base_vel_[0] = std::clamp(msg->linear.x, -max_twist_x, max_twist_x);
+        base_vel_[1] = std::clamp(msg->linear.y, -max_twist_y, max_twist_y);
+        base_vel_[2] = std::clamp(msg->angular.z, -max_twist_z, max_twist_z);
     }
 }
 
