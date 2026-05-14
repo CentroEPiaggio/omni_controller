@@ -239,9 +239,9 @@ CallbackReturn OmniController::on_configure(const rclcpp_lifecycle::State&)
     }
 
     // Velocity limits
-    max_twist_x = get_node()->get_parameter("twist_max_x").as_bool();
-    max_twist_y = get_node()->get_parameter("twist_max_y").as_bool();
-    max_twist_z = get_node()->get_parameter("twist_max_z").as_bool();
+    max_twist_x = get_node()->get_parameter("twist_max_x").as_double();
+    max_twist_y = get_node()->get_parameter("twist_max_y").as_double();
+    max_twist_z = get_node()->get_parameter("twist_max_z").as_double();
 
 
     // ── Transition configuration (rest / stand) ──────────────────────────
