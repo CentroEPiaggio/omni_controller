@@ -68,7 +68,7 @@ std::vector<double> MecanumIK::inverse(double vx, double vy, double omega) const
         for (int j = 0; j < 3; j++) {
             w_v += base2wheel_[i][j] * base_vel[j];
         }
-        wheel_vels[i] = w_v;
+        wheel_vels[i] = -w_v;
     }
     return wheel_vels;
 }

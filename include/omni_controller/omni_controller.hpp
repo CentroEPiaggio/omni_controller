@@ -167,7 +167,20 @@ private:
     // ─── Buffered commands (protected by mutex) ─────────────────────────
     std::mutex var_mutex_;
     double base_vel_[3] = {0.0, 0.0, 0.0};
+    double base_vel_filtered_[3] = {0.0, 0.0, 0.0};
 
+    // Low-pass filter on velocity command
+    bool lpf_enabled_ = false;
+    double lpf_cutoff_freq_ = 1.0; // Hz
+    double lpf_alpha_ = 0.0;       // Computed LPF coefficient
+    rclcpp::Time last_vel_filter_time_;
+    bool vel_filter_time_initialized_ = false;
+
+    // Velocity limits
+    double max_twist_x = 0.5;
+    double max_twist_y = 0.5;
+    double max_twist_z = 0.5;
+    
     // Direct wheel commands: per-wheel buffered values
     std::map<std::string, double> direct_wheel_vel_cmd_;
     std::map<std::string, double> direct_wheel_kp_cmd_;
@@ -254,6 +267,7 @@ private:
     void update_safety_monitoring();
     void evaluate_safety_transitions();
     void update_damping(const rclcpp::Time& time);
+    void apply_velocity_filter(const rclcpp::Time& time);
     static double cosine_interp(double a, double b, double t);
 
     // ─── Helpers ────────────────────────────────────────────────────────
