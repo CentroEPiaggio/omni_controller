@@ -79,6 +79,7 @@ CallbackReturn OmniController::on_init()
         auto_declare<std::string>("safety.critical_strategy", "damping");
         auto_declare<double>("safety.damping_duration", 3.0);
         auto_declare<double>("safety.joints_reference_timeout", 0.5);
+        auto_declare<double>("safety.wheels_reference_timeout", 0.5);
         auto_declare<double>("safety.heartbeat_timeout", 1.0);
     } catch (const std::exception& e) {
         RCLCPP_ERROR(
@@ -282,6 +283,8 @@ CallbackReturn OmniController::on_configure(const rclcpp_lifecycle::State&)
     damping_duration_ = get_node()->get_parameter("safety.damping_duration").as_double();
     joints_reference_timeout_ =
         get_node()->get_parameter("safety.joints_reference_timeout").as_double();
+    wheels_reference_timeout_ =
+        get_node()->get_parameter("safety.wheels_reference_timeout").as_double();
     heartbeat_timeout_ = get_node()->get_parameter("safety.heartbeat_timeout").as_double();
 
     if (critical_strategy_ != "damping" && critical_strategy_ != "default_config" &&
@@ -504,6 +507,10 @@ CallbackReturn OmniController::on_activate(const rclcpp_lifecycle::State&)
     damping_time_initialized_ = false;
     joints_reference_received_ = false;
     joints_reference_timeout_throttle_ = 0;
+    twist_received_ = false;
+    twist_timeout_throttle_ = 0;
+    direct_wheels_received_ = false;
+    direct_wheels_timeout_throttle_ = 0;
     heartbeat_received_ = false;
 
     // Reset velocity filter state
@@ -697,6 +704,38 @@ OmniController::update(const rclcpp::Time& time, const rclcpp::Duration&)
             break;
         case ControllerState::ACTIVE:
             if (has_wheels_) {
+                // Check wheels reference timeout (per mode)
+                if (wheel_mode_ == WHEEL_IK && twist_received_) {
+                    double since_last = (time - last_twist_time_).seconds();
+                    if (since_last > wheels_reference_timeout_) {
+                        base_vel_[0] = 0.0;
+                        base_vel_[1] = 0.0;
+                        base_vel_[2] = 0.0;
+                        if (++twist_timeout_throttle_ >= 500) {
+                            RCLCPP_WARN(
+                                get_node()->get_logger(),
+                                "Twist timeout (%.2fs since last message), zeroing base velocity",
+                                since_last
+                            );
+                            twist_timeout_throttle_ = 0;
+                        }
+                    }
+                } else if (wheel_mode_ == WHEEL_DIRECT && direct_wheels_received_) {
+                    double since_last = (time - last_direct_wheels_time_).seconds();
+                    if (since_last > wheels_reference_timeout_) {
+                        for (auto& [name, vel] : direct_wheel_vel_cmd_)
+                            vel = 0.0;
+                        if (++direct_wheels_timeout_throttle_ >= 500) {
+                            RCLCPP_WARN(
+                                get_node()->get_logger(),
+                                "Direct wheels timeout (%.2fs since last message), zeroing wheel "
+                                "velocities",
+                                since_last
+                            );
+                            direct_wheels_timeout_throttle_ = 0;
+                        }
+                    }
+                }
                 if (lpf_enabled_)
                     apply_velocity_filter(time);
                 if (wheel_mode_ == WHEEL_IK && wheel_ik_)
@@ -745,6 +784,9 @@ void OmniController::twist_callback(const geometry_msgs::msg::Twist::SharedPtr m
 {
     std::lock_guard<std::mutex> lg(var_mutex_);
     dl_miss_count_ = 0;
+    last_twist_time_ = get_node()->now();
+    twist_received_ = true;
+    twist_timeout_throttle_ = 0;
     if (c_stt_ == ControllerState::ACTIVE) {
         base_vel_[0] = std::clamp(msg->linear.x, -max_twist_x, max_twist_x);
         base_vel_[1] = std::clamp(msg->linear.y, -max_twist_y, max_twist_y);
@@ -818,6 +860,9 @@ void OmniController::activate_service_cb(
 void OmniController::direct_wheels_callback(const JointsCommand::SharedPtr msg)
 {
     std::lock_guard<std::mutex> lg(var_mutex_);
+    last_direct_wheels_time_ = get_node()->now();
+    direct_wheels_received_ = true;
+    direct_wheels_timeout_throttle_ = 0;
     if (c_stt_ != ControllerState::ACTIVE)
         return;
     for (size_t i = 0; i < msg->name.size(); i++) {
