@@ -123,6 +123,7 @@ private:
     std::string critical_strategy_ = "damping";
     double damping_duration_ = 3.0;
     double joints_reference_timeout_ = 0.5;
+    double wheels_reference_timeout_ = 0.5;
     double heartbeat_timeout_ = 1.0;
 
     // ─── Wheel IK / direct mode ────────────────────────────────────────
@@ -159,6 +160,14 @@ private:
     rclcpp::Time last_joints_reference_time_;
     bool joints_reference_received_ = false;
     int joints_reference_timeout_throttle_ = 0;
+
+    // Wheels reference timeout (twist + direct_wheels tracked separately)
+    rclcpp::Time last_twist_time_;
+    bool twist_received_ = false;
+    int twist_timeout_throttle_ = 0;
+    rclcpp::Time last_direct_wheels_time_;
+    bool direct_wheels_received_ = false;
+    int direct_wheels_timeout_throttle_ = 0;
 
     // NUC heartbeat monitoring
     rclcpp::Time last_heartbeat_time_;
