@@ -61,7 +61,7 @@ struct JointTargets {
     double q_stand = 0.0;
 };
 
-enum TransitionTarget { TARGET_REST = 0, TARGET_STAND };
+enum TransitionTarget { TARGET_REST = 0, TARGET_STAND, TARGET_ACTIVATION };
 
 enum WheelMode { WHEEL_IK = 0, WHEEL_DIRECT };
 
@@ -134,14 +134,21 @@ private:
     ControllerState c_stt_ = ControllerState::INACTIVE;
     std::atomic<int> dl_miss_count_{0};
 
-    // ─── Transitions (rest / stand) ────────────────────────────────────
+    // ─── Transitions (activation / rest / stand) ───────────────────────
     double rest_duration_ = 5.0;
     double stand_duration_ = 5.0;
+    double activation_duration_ = 2.0;
+    double activation_hip_offset_rad_ = 0.0;
     std::map<std::string, JointTargets> joint_targets_;
     std::map<std::string, double> transition_q_start_;
     TransitionTarget transition_target_ = TARGET_REST;
     rclcpp::Time transition_start_time_;
     bool transition_time_initialized_ = false;
+
+    // After TARGET_ACTIVATION completes, store the raised HFE positions so
+    // that TARGET_STAND can start from here instead of actual hw position.
+    std::map<std::string, double> post_activation_q_;
+    bool activation_done_ = false;
 
     // ─── Safety state ─────────────────────────────────────────────────
     SafetyState safety_state_ = SafetyState::SAFETY_NORMAL;
@@ -286,6 +293,11 @@ private:
     double get_command(const std::string& key) const;
     /// Set command interface value by "joint/interface" key.
     void set_command(const std::string& key, double value);
+
+    /// Returns true if joint name contains "HFE" (hip flexion joint).
+    static bool is_hfe_joint(const std::string& name) {
+        return name.find("HFE") != std::string::npos;
+    }
 };
 
 } // namespace omni_controller

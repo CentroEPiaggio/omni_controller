@@ -64,9 +64,11 @@ CallbackReturn OmniController::on_init()
         auto_declare<double>("twist_max_y", 0.5);
         auto_declare<double>("twist_max_z", 1.0);
 
-        // Transitions (rest / stand)
+        // Transitions (activation / rest / stand)
         auto_declare<double>("rest_duration", 0.0);
         auto_declare<double>("stand_duration", 0.0);
+        auto_declare<double>("activation_duration", 0.0);
+        auto_declare<double>("activation_hip_offset_deg", 0.0);
 
         // Safety
         auto_declare<bool>("safety.enabled", true);
@@ -245,9 +247,19 @@ CallbackReturn OmniController::on_configure(const rclcpp_lifecycle::State&)
     max_twist_z = get_node()->get_parameter("twist_max_z").as_double();
 
 
-    // ── Transition configuration (rest / stand) ──────────────────────────
+    // ── Transition configuration (activation / rest / stand) ─────────────
     rest_duration_ = get_node()->get_parameter("rest_duration").as_double();
     stand_duration_ = get_node()->get_parameter("stand_duration").as_double();
+
+    activation_duration_ = get_node()->get_parameter("activation_duration").as_double();
+    double hip_offset_deg = get_node()->get_parameter("activation_hip_offset_deg").as_double();
+    activation_hip_offset_rad_ = hip_offset_deg * M_PI / 180.0;
+    RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Activation: duration=%.2f s, hip_offset=%.2f deg (%.4f rad)",
+        activation_duration_, hip_offset_deg, activation_hip_offset_rad_
+    );
+
     if ((rest_duration_ <= 0.0 && stand_duration_ <= 0.0) || !has_legs_) {
         has_transitions_ = false;
     } else {
@@ -518,6 +530,10 @@ CallbackReturn OmniController::on_activate(const rclcpp_lifecycle::State&)
     base_vel_filtered_[0] = 0.0;
     base_vel_filtered_[1] = 0.0;
     base_vel_filtered_[2] = 0.0;
+
+    // Reset activation bookkeeping
+    activation_done_ = false;
+    post_activation_q_.clear();
 
     RCLCPP_INFO(
         get_node()->get_logger(), "on_activate successful (INACTIVE, waiting for activate_srv)"
@@ -837,23 +853,45 @@ void OmniController::activate_service_cb(
         res->message = "Cannot activate: safety state is not NORMAL";
         return;
     }
-    if (c_stt_ == ControllerState::INACTIVE && req->data) {
-        // Snap leg commands to actual positions to prevent jumps
-        if (has_legs_) {
-            for (const auto& jnt : joints_) {
-                leg_pos_cmd_[jnt] = get_state(jnt + "/" + hardware_interface::HW_IF_POSITION);
-                leg_vel_cmd_[jnt] = 0.0;
-                leg_eff_cmd_[jnt] = 0.0;
-                leg_kp_cmd_[jnt] = 1.0;
-                leg_kd_cmd_[jnt] = 1.0;
-            }
+    if (c_stt_ != ControllerState::INACTIVE || !req->data) {
+        res->success = false;
+        res->message = req->data ? "Not in Inactive mode" : "Invalid request";
+        return;
+    }
+
+    // Snap leg commands to actual positions to prevent jumps
+    if (has_legs_) {
+        for (const auto& jnt : joints_) {
+            leg_pos_cmd_[jnt] = get_state(jnt + "/" + hardware_interface::HW_IF_POSITION);
+            leg_vel_cmd_[jnt] = 0.0;
+            leg_eff_cmd_[jnt] = 0.0;
+            leg_kp_cmd_[jnt] = 1.0;
+            leg_kd_cmd_[jnt] = 1.0;
         }
+    }
+
+    // Activation transition: raise HFE joints by activation_hip_offset_rad_.
+    // Otherwise go straight to ACTIVE.
+    if (has_legs_ && activation_duration_ > 0.0 &&
+        std::abs(activation_hip_offset_rad_) > 1e-6) {
+        activation_done_ = false;
+        post_activation_q_.clear();
+        transition_target_ = TARGET_ACTIVATION;
+        transition_time_initialized_ = false;
+        c_stt_ = ControllerState::TRANSITION;
+        res->success = true;
+        res->message = "Activation started: raising HFE joints";
+        RCLCPP_INFO(
+            get_node()->get_logger(),
+            "Activation transition started (HFE offset=%.4f rad over %.2f s)",
+            activation_hip_offset_rad_, activation_duration_
+        );
+    } else {
+        activation_done_ = false;
+        post_activation_q_.clear();
         c_stt_ = ControllerState::ACTIVE;
         res->success = true;
         res->message = "Active mode activated";
-    } else {
-        res->success = false;
-        res->message = req->data ? "Not in Inactive mode" : "Invalid request";
     }
 }
 
@@ -1140,16 +1178,18 @@ void OmniController::stand_service_cb(
     }
     if ((c_stt_ == ControllerState::INACTIVE || c_stt_ == ControllerState::ACTIVE) &&
         has_transitions_ && req->data) {
-        if (c_stt_ == ControllerState::INACTIVE && has_legs_) {
-            for (const auto& jnt : joints_)
-                leg_pos_cmd_[jnt] = get_state(jnt + "/" + hardware_interface::HW_IF_POSITION);
-        }
         transition_target_ = TARGET_STAND;
         transition_time_initialized_ = false;
         c_stt_ = ControllerState::TRANSITION;
         res->success = true;
-        res->message = "Stand transition started";
-        RCLCPP_INFO(get_node()->get_logger(), "Transition started (target: stand)");
+        res->message = activation_done_
+            ? "Stand transition started from activation pose"
+            : "Stand transition started from current pose";
+        RCLCPP_INFO(
+            get_node()->get_logger(),
+            "Transition started (target: stand, from_activation=%s)",
+            activation_done_ ? "true" : "false"
+        );
     } else {
         res->success = false;
         res->message = req->data ? "Cannot start stand (already transitioning or not configured)"
@@ -1164,24 +1204,62 @@ double OmniController::cosine_interp(double a, double b, double t)
 
 void OmniController::update_transition(const rclcpp::Time& time)
 {
-    // Initialize timer on first call
+    // Initialize timer and start positions on first call
     if (!transition_time_initialized_) {
         transition_start_time_ = time;
         transition_time_initialized_ = true;
 
-        // Use the last commanded leg position as the interp origin.
-        for (const auto& jnt : joints_)
-            transition_q_start_[jnt] = leg_pos_cmd_[jnt];
+        for (const auto& jnt : joints_) {
+            if (transition_target_ == TARGET_STAND && activation_done_ &&
+                post_activation_q_.count(jnt)) {
+                // Start from the saved post-activation position
+                transition_q_start_[jnt] = post_activation_q_[jnt];
+            } else {
+                // Default: read actual hardware position
+                transition_q_start_[jnt] =
+                    get_state(jnt + "/" + hardware_interface::HW_IF_POSITION);
+            }
+        }
     }
 
-    double duration = (transition_target_ == TARGET_REST) ? rest_duration_ : stand_duration_;
+    // Duration depends on target
+    double duration;
+    switch (transition_target_) {
+    case TARGET_ACTIVATION: duration = activation_duration_; break;
+    case TARGET_REST:       duration = rest_duration_;       break;
+    case TARGET_STAND:      duration = stand_duration_;      break;
+    default:                duration = stand_duration_;      break;
+    }
     double elapsed = (time - transition_start_time_).seconds();
     double t = std::clamp(elapsed / duration, 0.0, 1.0);
 
-    // Interpolate leg joints: current_pos → target
+    // Compute target for each joint
     for (const auto& jnt : joints_) {
-        const auto& cfg = joint_targets_[jnt];
-        double q_target = (transition_target_ == TARGET_REST) ? cfg.q_rest : cfg.q_stand;
+        double q_target = 0.0;
+
+        switch (transition_target_) {
+        case TARGET_ACTIVATION:
+            if (is_hfe_joint(jnt)) {
+                // Move HFE by hip_offset in the same direction as q_stand.
+                double sign = 1.0;
+                if (joint_targets_.count(jnt) && joint_targets_[jnt].q_stand > 0.0)
+                    sign = -1.0;
+                q_target = transition_q_start_[jnt] + sign * activation_hip_offset_rad_;
+            } else {
+                // Hold KFE (and any other joints) at their start position
+                q_target = transition_q_start_[jnt];
+            }
+            break;
+
+        case TARGET_REST:
+            q_target = joint_targets_.count(jnt) ? joint_targets_[jnt].q_rest : 0.0;
+            break;
+
+        case TARGET_STAND:
+            q_target = joint_targets_.count(jnt) ? joint_targets_[jnt].q_stand : 0.0;
+            break;
+        }
+
         double q = cosine_interp(transition_q_start_[jnt], q_target, t);
 
         if (sim_flag_) {
@@ -1211,23 +1289,74 @@ void OmniController::update_transition(const rclcpp::Time& time)
         }
     }
 
-    // Transition complete
+    // Handle completion
     if (t >= 1.0) {
-        for (const auto& jnt : joints_) {
-            const auto& cfg = joint_targets_[jnt];
-            double q_target = (transition_target_ == TARGET_REST) ? cfg.q_rest : cfg.q_stand;
-            leg_pos_cmd_[jnt] = q_target;
-            leg_vel_cmd_[jnt] = 0.0;
-            leg_eff_cmd_[jnt] = 0.0;
-            leg_kp_cmd_[jnt] = (transition_target_ == TARGET_REST) ? 0.0 : 1.0;
-            leg_kd_cmd_[jnt] = 1.0;
+        switch (transition_target_) {
+
+        case TARGET_ACTIVATION: {
+            // Save raised pose, buffer the hold command, then go ACTIVE
+            post_activation_q_.clear();
+            for (const auto& jnt : joints_) {
+                double q_final = transition_q_start_[jnt];
+                if (is_hfe_joint(jnt)) {
+                    double sign = (joint_targets_.count(jnt) &&
+                                   joint_targets_[jnt].q_stand > 0.0) ? -1.0 : 1.0;
+                    q_final += sign * activation_hip_offset_rad_;
+                }
+                post_activation_q_[jnt] = q_final;
+                leg_pos_cmd_[jnt] = q_final;
+                leg_vel_cmd_[jnt] = 0.0;
+                leg_eff_cmd_[jnt] = 0.0;
+                leg_kp_cmd_[jnt] = 1.0;
+                leg_kd_cmd_[jnt] = 1.0;
+            }
+            activation_done_ = true;
+            transition_completed_ = true;
+            c_stt_ = ControllerState::ACTIVE;
+            RCLCPP_INFO(
+                get_node()->get_logger(),
+                "Activation transition complete (HFE raised %.4f rad) → ACTIVE",
+                activation_hip_offset_rad_
+            );
+            break;
         }
-        transition_completed_ = true;
-        c_stt_ = ControllerState::ACTIVE;
-        RCLCPP_INFO(
-            get_node()->get_logger(), "Transition to %s complete, transitioning to ACTIVE",
-            (transition_target_ == TARGET_REST) ? "rest" : "stand"
-        );
+
+        case TARGET_REST: {
+            for (const auto& jnt : joints_) {
+                double q_rest = joint_targets_.count(jnt) ? joint_targets_[jnt].q_rest : 0.0;
+                leg_pos_cmd_[jnt] = q_rest;
+                leg_vel_cmd_[jnt] = 0.0;
+                leg_eff_cmd_[jnt] = 0.0;
+                leg_kp_cmd_[jnt] = 0.0;
+                leg_kd_cmd_[jnt] = 1.0;
+            }
+            // Reset activation state so next activate starts fresh
+            activation_done_ = false;
+            post_activation_q_.clear();
+            transition_completed_ = true;
+            c_stt_ = ControllerState::INACTIVE;
+            RCLCPP_INFO(
+                get_node()->get_logger(),
+                "Rest transition complete → INACTIVE (joints at q_rest, torque released)"
+            );
+            break;
+        }
+
+        case TARGET_STAND: {
+            for (const auto& jnt : joints_) {
+                double q_stand = joint_targets_.count(jnt) ? joint_targets_[jnt].q_stand : 0.0;
+                leg_pos_cmd_[jnt] = q_stand;
+                leg_vel_cmd_[jnt] = 0.0;
+                leg_eff_cmd_[jnt] = 0.0;
+                leg_kp_cmd_[jnt] = 1.0;
+                leg_kd_cmd_[jnt] = 1.0;
+            }
+            transition_completed_ = true;
+            c_stt_ = ControllerState::ACTIVE;
+            RCLCPP_INFO(get_node()->get_logger(), "Stand transition complete → ACTIVE");
+            break;
+        }
+        }
     }
 }
 
