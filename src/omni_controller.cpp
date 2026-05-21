@@ -1097,9 +1097,10 @@ void OmniController::rest_service_cb(
 )
 {
     std::lock_guard<std::mutex> lg(var_mutex_);
-    if (safety_enabled_ && safety_state_ != SafetyState::SAFETY_NORMAL) {
+    if (safety_enabled_ && safety_state_ != SafetyState::SAFETY_NORMAL &&
+        safety_state_ != SafetyState::SAFETY_WARNING) {
         res->success = false;
-        res->message = "Cannot start rest: safety state is not NORMAL";
+        res->message = "Cannot start rest: safety state is CRITICAL or SHUTDOWN";
         return;
     }
     if ((c_stt_ == ControllerState::INACTIVE || c_stt_ == ControllerState::ACTIVE) &&
@@ -1131,9 +1132,10 @@ void OmniController::stand_service_cb(
 )
 {
     std::lock_guard<std::mutex> lg(var_mutex_);
-    if (safety_enabled_ && safety_state_ != SafetyState::SAFETY_NORMAL) {
+    if (safety_enabled_ && safety_state_ != SafetyState::SAFETY_NORMAL &&
+        safety_state_ != SafetyState::SAFETY_WARNING) {
         res->success = false;
-        res->message = "Cannot start stand: safety state is not NORMAL";
+        res->message = "Cannot start stand: safety state is CRITICAL or SHUTDOWN";
         return;
     }
     if ((c_stt_ == ControllerState::INACTIVE || c_stt_ == ControllerState::ACTIVE) &&
