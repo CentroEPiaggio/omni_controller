@@ -1104,6 +1104,14 @@ void OmniController::rest_service_cb(
     }
     if ((c_stt_ == ControllerState::INACTIVE || c_stt_ == ControllerState::ACTIVE) &&
         has_transitions_ && req->data) {
+        // From INACTIVE the motors are unpowered, so leg_pos_cmd_ may be stale
+        // (initialized to 0 or left over from a previous run). Snap it to the
+        // actual joint positions so the cosine interp starts from where the
+        // robot physically is.
+        if (c_stt_ == ControllerState::INACTIVE && has_legs_) {
+            for (const auto& jnt : joints_)
+                leg_pos_cmd_[jnt] = get_state(jnt + "/" + hardware_interface::HW_IF_POSITION);
+        }
         transition_target_ = TARGET_REST;
         transition_time_initialized_ = false;
         c_stt_ = ControllerState::TRANSITION;
@@ -1130,6 +1138,10 @@ void OmniController::stand_service_cb(
     }
     if ((c_stt_ == ControllerState::INACTIVE || c_stt_ == ControllerState::ACTIVE) &&
         has_transitions_ && req->data) {
+        if (c_stt_ == ControllerState::INACTIVE && has_legs_) {
+            for (const auto& jnt : joints_)
+                leg_pos_cmd_[jnt] = get_state(jnt + "/" + hardware_interface::HW_IF_POSITION);
+        }
         transition_target_ = TARGET_STAND;
         transition_time_initialized_ = false;
         c_stt_ = ControllerState::TRANSITION;
@@ -1155,9 +1167,9 @@ void OmniController::update_transition(const rclcpp::Time& time)
         transition_start_time_ = time;
         transition_time_initialized_ = true;
 
-        // Read current joint positions as the actual origin
+        // Use the last commanded leg position as the interp origin.
         for (const auto& jnt : joints_)
-            transition_q_start_[jnt] = get_state(jnt + "/" + hardware_interface::HW_IF_POSITION);
+            transition_q_start_[jnt] = leg_pos_cmd_[jnt];
     }
 
     double duration = (transition_target_ == TARGET_REST) ? rest_duration_ : stand_duration_;
