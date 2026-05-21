@@ -145,11 +145,6 @@ private:
     rclcpp::Time transition_start_time_;
     bool transition_time_initialized_ = false;
 
-    // After TARGET_ACTIVATION completes, store the raised HFE positions so
-    // that TARGET_STAND can start from here instead of actual hw position.
-    std::map<std::string, double> post_activation_q_;
-    bool activation_done_ = false;
-
     // ─── Safety state ─────────────────────────────────────────────────
     SafetyState safety_state_ = SafetyState::SAFETY_NORMAL;
     std::vector<double> temp_ema_; // per motor joint

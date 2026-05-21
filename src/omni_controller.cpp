@@ -531,10 +531,6 @@ CallbackReturn OmniController::on_activate(const rclcpp_lifecycle::State&)
     base_vel_filtered_[1] = 0.0;
     base_vel_filtered_[2] = 0.0;
 
-    // Reset activation bookkeeping
-    activation_done_ = false;
-    post_activation_q_.clear();
-
     RCLCPP_INFO(
         get_node()->get_logger(), "on_activate successful (INACTIVE, waiting for activate_srv)"
     );
@@ -874,8 +870,6 @@ void OmniController::activate_service_cb(
     // Otherwise go straight to ACTIVE.
     if (has_legs_ && activation_duration_ > 0.0 &&
         std::abs(activation_hip_offset_rad_) > 1e-6) {
-        activation_done_ = false;
-        post_activation_q_.clear();
         transition_target_ = TARGET_ACTIVATION;
         transition_time_initialized_ = false;
         c_stt_ = ControllerState::TRANSITION;
@@ -887,8 +881,6 @@ void OmniController::activate_service_cb(
             activation_hip_offset_rad_, activation_duration_
         );
     } else {
-        activation_done_ = false;
-        post_activation_q_.clear();
         c_stt_ = ControllerState::ACTIVE;
         res->success = true;
         res->message = "Active mode activated";
@@ -1182,14 +1174,8 @@ void OmniController::stand_service_cb(
         transition_time_initialized_ = false;
         c_stt_ = ControllerState::TRANSITION;
         res->success = true;
-        res->message = activation_done_
-            ? "Stand transition started from activation pose"
-            : "Stand transition started from current pose";
-        RCLCPP_INFO(
-            get_node()->get_logger(),
-            "Transition started (target: stand, from_activation=%s)",
-            activation_done_ ? "true" : "false"
-        );
+        res->message = "Stand transition started";
+        RCLCPP_INFO(get_node()->get_logger(), "Transition started (target: stand)");
     } else {
         res->success = false;
         res->message = req->data ? "Cannot start stand (already transitioning or not configured)"
@@ -1209,17 +1195,14 @@ void OmniController::update_transition(const rclcpp::Time& time)
         transition_start_time_ = time;
         transition_time_initialized_ = true;
 
-        for (const auto& jnt : joints_) {
-            if (transition_target_ == TARGET_STAND && activation_done_ &&
-                post_activation_q_.count(jnt)) {
-                // Start from the saved post-activation position
-                transition_q_start_[jnt] = post_activation_q_[jnt];
-            } else {
-                // Default: read actual hardware position
-                transition_q_start_[jnt] =
-                    get_state(jnt + "/" + hardware_interface::HW_IF_POSITION);
-            }
-        }
+        // Origin: actual hardware position. Motors are powered during any
+        // transition (activation just finished, IK was driving the legs, or
+        // we're already standing) so the measured state matches the last
+        // commanded pose to within a few mrad — fine for a cosine interp
+        // running over seconds.
+        for (const auto& jnt : joints_)
+            transition_q_start_[jnt] =
+                get_state(jnt + "/" + hardware_interface::HW_IF_POSITION);
     }
 
     // Duration depends on target
@@ -1294,8 +1277,7 @@ void OmniController::update_transition(const rclcpp::Time& time)
         switch (transition_target_) {
 
         case TARGET_ACTIVATION: {
-            // Save raised pose, buffer the hold command, then go ACTIVE
-            post_activation_q_.clear();
+            // Buffer the raised pose as the hold command, then go ACTIVE
             for (const auto& jnt : joints_) {
                 double q_final = transition_q_start_[jnt];
                 if (is_hfe_joint(jnt)) {
@@ -1303,14 +1285,12 @@ void OmniController::update_transition(const rclcpp::Time& time)
                                    joint_targets_[jnt].q_stand > 0.0) ? -1.0 : 1.0;
                     q_final += sign * activation_hip_offset_rad_;
                 }
-                post_activation_q_[jnt] = q_final;
                 leg_pos_cmd_[jnt] = q_final;
                 leg_vel_cmd_[jnt] = 0.0;
                 leg_eff_cmd_[jnt] = 0.0;
                 leg_kp_cmd_[jnt] = 1.0;
                 leg_kd_cmd_[jnt] = 1.0;
             }
-            activation_done_ = true;
             transition_completed_ = true;
             c_stt_ = ControllerState::ACTIVE;
             RCLCPP_INFO(
@@ -1330,9 +1310,6 @@ void OmniController::update_transition(const rclcpp::Time& time)
                 leg_kp_cmd_[jnt] = 0.0;
                 leg_kd_cmd_[jnt] = 1.0;
             }
-            // Reset activation state so next activate starts fresh
-            activation_done_ = false;
-            post_activation_q_.clear();
             transition_completed_ = true;
             c_stt_ = ControllerState::INACTIVE;
             RCLCPP_INFO(
